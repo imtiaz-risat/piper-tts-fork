@@ -12,6 +12,74 @@ from .vits.lightning import VitsModel
 _LOGGER = logging.getLogger(__package__)
 
 
+class HFCheckpointUploader(ModelCheckpoint):
+    def __init__(self, hf_repo_id: str, hf_token: str, session_id: str | None = None, **kwargs):
+        super().__init__(**kwargs)
+        self.hf_repo_id = hf_repo_id
+        self.hf_token = hf_token
+        self.session_id = session_id
+        self._api = None
+
+    def _ensure_api(self):
+        """Ensure HuggingFace API is initialized."""
+        if self._api is None:
+            from huggingface_hub import HfApi
+
+            self._api = HfApi()
+
+    def _upload_last(self):
+        """Upload last checkpoint to HuggingFace."""
+        last_ckpt_path = getattr(self, "last_model_path", None)
+        if not last_ckpt_path:
+            dirpath = getattr(self, "dirpath", None)
+            if dirpath and Path(dirpath).exists():
+                try:
+                    ckpts = sorted(
+                        Path(dirpath).glob("*.ckpt"),
+                        key=lambda p: p.stat().st_mtime,
+                        reverse=True,
+                    )
+                    if ckpts:
+                        last_ckpt_path = str(ckpts[0])
+                except Exception:
+                    last_ckpt_path = None
+        if last_ckpt_path and Path(last_ckpt_path).exists():
+            try:
+                self._ensure_api()
+                self._api.create_repo(
+                    repo_id=self.hf_repo_id,
+                    token=self.hf_token,
+                    exist_ok=True,
+                )
+                filename = Path(last_ckpt_path).name
+                path_in_repo = (
+                    f"{self.session_id}/{filename}" if self.session_id else filename
+                )
+                self._api.upload_file(
+                    path_or_fileobj=last_ckpt_path,
+                    path_in_repo=path_in_repo,
+                    repo_id=self.hf_repo_id,
+                    token=self.hf_token,
+                )
+                _LOGGER.info("Uploaded checkpoint to HuggingFace: %s", last_ckpt_path)
+            except Exception as e:
+                _LOGGER.error("HuggingFace upload failed: %s", e)
+
+    def on_save_checkpoint(self, trainer, pl_module, checkpoint):
+        """Upload last checkpoint on save checkpoint."""
+        self._upload_last()
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        """Upload last checkpoint on train epoch end."""
+        super().on_train_epoch_end(trainer, pl_module)
+        self._upload_last()
+
+    def on_validation_end(self, trainer, pl_module):
+        """Upload last checkpoint on validation end."""
+        super().on_validation_end(trainer, pl_module)
+        self._upload_last()
+
+
 def main():
     logging.basicConfig(level=logging.DEBUG)
 
@@ -37,6 +105,12 @@ def main():
     Trainer.add_argparse_args(parser)
     VitsModel.add_model_specific_args(parser)
     parser.add_argument("--seed", type=int, default=1234)
+    parser.add_argument("--push-to-hf", action="store_true", help="Enable HF upload")
+    parser.add_argument(
+        "--hf-repo-id", help="HuggingFace repo ID, e.g. username/my-model"
+    )
+    parser.add_argument("--hf-token", help="HuggingFace token with write access")
+    parser.add_argument("--session-id", help="Subfolder in HF repo to store checkpoints")
     args = parser.parse_args()
     _LOGGER.debug(args)
 
@@ -59,7 +133,25 @@ def main():
 
     trainer = Trainer.from_argparse_args(args)
     if args.checkpoint_epochs is not None:
-        trainer.callbacks = [ModelCheckpoint(every_n_epochs=args.checkpoint_epochs)]
+        callbacks = []
+        if getattr(args, "push_to_hf", False):
+            if not args.hf_repo_id or not args.hf_token:
+                _LOGGER.error(
+                    "--push-to-hf requires --hf-repo-id and --hf-token"
+                )
+            else:
+                callbacks.append(
+                    HFCheckpointUploader(
+                        hf_repo_id=args.hf_repo_id,
+                        hf_token=args.hf_token,
+                        session_id=getattr(args, "session_id", None),
+                        every_n_epochs=args.checkpoint_epochs,
+                        save_top_k=-1,
+                    )
+                )
+        else:
+            callbacks.append(ModelCheckpoint(every_n_epochs=args.checkpoint_epochs))
+        trainer.callbacks = callbacks
         _LOGGER.debug(
             "Checkpoints will be saved every %s epoch(s)", args.checkpoint_epochs
         )
