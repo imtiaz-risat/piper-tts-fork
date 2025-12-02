@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 
 import torch
+import pytorch_lightning as pl
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint
 
@@ -72,12 +73,46 @@ class HFCheckpointUploader(ModelCheckpoint):
     def on_train_epoch_end(self, trainer, pl_module):
         """Upload last checkpoint on train epoch end."""
         super().on_train_epoch_end(trainer, pl_module)
-        self._upload_last()
+        # self._upload_last()
 
     def on_validation_end(self, trainer, pl_module):
         """Upload last checkpoint on validation end."""
         super().on_validation_end(trainer, pl_module)
-        self._upload_last()
+        # self._upload_last()
+
+
+class KeepLastKCheckpoints(pl.Callback):
+    def __init__(self, k: int):
+        self.k = k
+
+    def _prune(self, dirpath):
+        if not dirpath:
+            return
+        p = Path(dirpath)
+        if not p.exists():
+            return
+        ckpts = sorted(
+            p.glob("*.ckpt"), key=lambda x: x.stat().st_mtime, reverse=True
+        )
+        for old in ckpts[self.k:]:
+            try:
+                old.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        if not trainer.is_global_zero:
+            return
+        for cb in trainer.callbacks:
+            if isinstance(cb, ModelCheckpoint):
+                self._prune(getattr(cb, "dirpath", None))
+
+    def on_save_checkpoint(self, trainer, pl_module, checkpoint):
+        if not trainer.is_global_zero:
+            return
+        for cb in trainer.callbacks:
+            if isinstance(cb, ModelCheckpoint):
+                self._prune(getattr(cb, "dirpath", None))
 
 
 def main():
@@ -111,6 +146,7 @@ def main():
     )
     parser.add_argument("--hf-token", help="HuggingFace token with write access")
     parser.add_argument("--session-id", help="Subfolder in HF repo to store checkpoints")
+    parser.add_argument("--keep-last-k", type=int, help="Keep only last K checkpoints")
     args = parser.parse_args()
     _LOGGER.debug(args)
 
@@ -151,6 +187,8 @@ def main():
                 )
         else:
             callbacks.append(ModelCheckpoint(every_n_epochs=args.checkpoint_epochs))
+        if getattr(args, "keep_last_k", None):
+            callbacks.append(KeepLastKCheckpoints(args.keep_last_k))
         trainer.callbacks = callbacks
         _LOGGER.debug(
             "Checkpoints will be saved every %s epoch(s)", args.checkpoint_epochs
