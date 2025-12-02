@@ -186,7 +186,12 @@ def main():
                     )
                 )
         else:
-            callbacks.append(ModelCheckpoint(every_n_epochs=args.checkpoint_epochs))
+            callbacks.append(
+                ModelCheckpoint(
+                    every_n_epochs=args.checkpoint_epochs,
+                    save_top_k=-1,
+                )
+            )
         if getattr(args, "keep_last_k", None):
             callbacks.append(KeepLastKCheckpoints(args.keep_last_k))
         trainer.callbacks = callbacks
