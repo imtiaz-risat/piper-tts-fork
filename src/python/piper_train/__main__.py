@@ -73,7 +73,7 @@ class HFCheckpointUploader(ModelCheckpoint):
     def on_train_epoch_end(self, trainer, pl_module):
         """Upload last checkpoint on train epoch end."""
         super().on_train_epoch_end(trainer, pl_module)
-        # self._upload_last()
+        self._upload_last()
 
     def on_validation_end(self, trainer, pl_module):
         """Upload last checkpoint on validation end."""
